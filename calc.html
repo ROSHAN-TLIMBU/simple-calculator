@@ -1,0 +1,361 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Delete, Calculator as CalculatorIcon, Sparkles, X, Send, Loader2 } from 'lucide-react';
+
+export default function App() {
+  const [current, setCurrent] = useState('0');
+  const [previous, setPrevious] = useState('');
+  const [operation, setOperation] = useState(null);
+  const [overwrite, setOverwrite] = useState(false);
+  
+  // AI specific state
+  const [showAI, setShowAI] = useState(false);
+  const [aiQuery, setAiQuery] = useState('');
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiMessage, setAiMessage] = useState(''); // Feedback from AI
+
+  // Helper to format numbers
+  const formatNumber = (num) => {
+    if (num === 'Error') return 'Error';
+    if (!num) return '';
+    // Remove formatting characters if present for reprocessing
+    const cleanNum = num.toString().replace(/,/g, '');
+    const [integer, decimal] = cleanNum.split('.');
+    
+    if (isNaN(parseFloat(cleanNum))) return num; // Return as is if not a number (e.g. text error)
+
+    if (decimal === undefined) {
+      return new Intl.NumberFormat('en-US').format(integer);
+    }
+    return `${new Intl.NumberFormat('en-US').format(integer)}.${decimal}`;
+  };
+
+  const calculate = (a, b, op) => {
+    const prev = parseFloat(a);
+    const curr = parseFloat(b);
+    if (isNaN(prev) || isNaN(curr)) return '';
+
+    let computation = '';
+    switch (op) {
+      case '+':
+        computation = prev + curr;
+        break;
+      case '-':
+        computation = prev - curr;
+        break;
+      case '×':
+        computation = prev * curr;
+        break;
+      case '÷':
+        if (curr === 0) return 'Error';
+        computation = prev / curr;
+        break;
+      default:
+        return '';
+    }
+    
+    return Math.round(computation * 100000000) / 100000000;
+  };
+
+  const handleClear = () => {
+    setCurrent('0');
+    setPrevious('');
+    setOperation(null);
+    setOverwrite(false);
+    setAiMessage('');
+  };
+
+  const handleDelete = () => {
+    if (overwrite) {
+      setCurrent('0');
+      setOverwrite(false);
+      return;
+    }
+    if (current === 'Error') {
+      handleClear();
+      return;
+    }
+    if (current.length === 1) {
+      setCurrent('0');
+    } else {
+      setCurrent(current.slice(0, -1));
+    }
+  };
+
+  const handleNumber = (number) => {
+    setAiMessage(''); // Clear AI message on new input
+    if (current === 'Error') {
+      setCurrent(number);
+      return;
+    }
+    if (overwrite) {
+      setCurrent(number);
+      setOverwrite(false);
+    } else {
+      if (number === '0' && current === '0') return;
+      if (number === '.' && current.includes('.')) return;
+      
+      setCurrent(current === '0' && number !== '.' ? number : current + number);
+    }
+  };
+
+  const handleOperation = (op) => {
+    setAiMessage('');
+    if (current === 'Error') return;
+    if (previous === '') {
+      setPrevious(current);
+      setOperation(op);
+      setOverwrite(true);
+    } else if (operation) {
+      if (!overwrite) {
+        const result = calculate(previous, current, operation);
+        setPrevious(`${result}`);
+        setCurrent(`${result}`);
+      }
+      setOperation(op);
+      setOverwrite(true);
+    }
+  };
+
+  const handleEquals = () => {
+    if (current === 'Error') return;
+    if (operation && previous) {
+      const result = calculate(previous, current, operation);
+      setCurrent(`${result}`);
+      setPrevious('');
+      setOperation(null);
+      setOverwrite(true);
+    }
+  };
+
+  const handlePercent = () => {
+    if (current === 'Error') return;
+    const curr = parseFloat(current);
+    setCurrent((curr / 100).toString());
+  };
+
+  // --- Gemini API Integration ---
+  const callGeminiWithBackoff = async (prompt, retries = 3, delay = 1000) => {
+    const apiKey = ""; // Injected at runtime
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+    
+    const payload = {
+      contents: [{ parts: [{ text: prompt }] }],
+      systemInstruction: {
+        parts: [{ text: `You are a calculator assistant. Solve the user's math problem. 
+        Strictly return a valid JSON object with this format: { "result": number, "explanation": "string" }. 
+        The "result" must be a clean number (no commas, no currency symbols). 
+        The "explanation" should be very concise (max 6 words).
+        Example: User: "5+5", Response: { "result": 10, "explanation": "Simple addition" }.
+        Example: User: "Bill 50, 20% tip", Response: { "result": 60, "explanation": "50 + 10 tip" }.` }]
+      },
+      generationConfig: {
+        responseMimeType: "application/json"
+      }
+    };
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      return JSON.parse(data.candidates[0].content.parts[0].text);
+    } catch (error) {
+      if (retries > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return callGeminiWithBackoff(prompt, retries - 1, delay * 2);
+      }
+      throw error;
+    }
+  };
+
+  const handleAskAI = async (e) => {
+    e.preventDefault();
+    if (!aiQuery.trim()) return;
+
+    setIsAiLoading(true);
+    try {
+      const data = await callGeminiWithBackoff(aiQuery);
+      
+      setCurrent(String(data.result));
+      setAiMessage(data.explanation); // Show explanation in the previous/history slot
+      setPrevious('');
+      setOperation(null);
+      setOverwrite(true);
+      setShowAI(false); // Close AI view
+      setAiQuery(''); // Clear query
+    } catch (error) {
+      console.error(error);
+      setAiMessage('Failed to calculate');
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
+
+  // Keyboard support
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Don't trigger calculator keys if typing in AI input
+      if (showAI) return;
+
+      const { key } = e;
+      
+      if (/[0-9]/.test(key)) {
+        handleNumber(key);
+      } else if (key === '.') {
+        handleNumber('.');
+      } else if (key === 'Enter' || key === '=') {
+        e.preventDefault();
+        handleEquals();
+      } else if (key === 'Backspace') {
+        handleDelete();
+      } else if (key === 'Escape') {
+        handleClear();
+      } else if (key === '+') {
+        handleOperation('+');
+      } else if (key === '-') {
+        handleOperation('-');
+      } else if (key === '*') {
+        handleOperation('×');
+      } else if (key === '/') {
+        handleOperation('÷');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [current, previous, operation, overwrite, showAI]);
+
+  // Button Component
+  const Button = ({ text, onClick, variant = 'default', className = '' }) => {
+    const baseStyles = "h-16 text-2xl font-medium rounded-2xl transition-all duration-100 active:scale-95 flex items-center justify-center select-none shadow-sm";
+    
+    const variants = {
+      default: "bg-slate-700 text-white hover:bg-slate-600",
+      action: "bg-indigo-500 text-white hover:bg-indigo-400 shadow-indigo-500/20",
+      secondary: "bg-slate-500 text-slate-100 hover:bg-slate-400",
+      accent: "bg-emerald-500 text-white hover:bg-emerald-400"
+    };
+
+    return (
+      <button 
+        onClick={onClick}
+        className={`${baseStyles} ${variants[variant]} ${className}`}
+      >
+        {text}
+      </button>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 font-sans">
+      <div className="w-full max-w-sm bg-slate-800 rounded-3xl shadow-2xl overflow-hidden border border-slate-700 relative">
+        
+        {/* Header / Display Area */}
+        <div className="p-6 pb-2 bg-gradient-to-b from-slate-800 to-slate-800/50">
+          <div className="flex justify-between items-center mb-4 text-slate-400">
+            <div className="flex items-center gap-2">
+              <CalculatorIcon size={18} />
+              <span className="text-sm font-medium tracking-wide">CALCULATOR</span>
+            </div>
+            
+            {/* AI Toggle Button */}
+            <button 
+              onClick={() => setShowAI(!showAI)}
+              className={`p-2 rounded-lg transition-colors ${showAI ? 'bg-indigo-500/20 text-indigo-400' : 'hover:bg-slate-700 text-slate-400'}`}
+              title="Magic Math (AI)"
+            >
+              {showAI ? <X size={18} /> : <Sparkles size={18} />}
+            </button>
+          </div>
+
+          <div className="flex flex-col items-end gap-1 h-32 justify-end break-all">
+            {/* Previous Calculation or AI Message */}
+            <div className={`text-lg h-8 font-medium transition-colors ${aiMessage ? 'text-indigo-400' : 'text-slate-400'}`}>
+              {aiMessage ? (
+                <span className="flex items-center gap-2 animate-fadeIn">
+                  <Sparkles size={14} /> {aiMessage}
+                </span>
+              ) : (
+                previous && `${formatNumber(previous)} ${operation || ''}`
+              )}
+            </div>
+            
+            {/* Current Input */}
+            <div className={`text-5xl font-bold text-white tracking-tight ${current.length > 10 ? 'text-3xl' : ''} transition-all duration-200`}>
+              {formatNumber(current)}
+            </div>
+          </div>
+        </div>
+
+        {/* Main Content Area - Switches between Keypad and AI Input */}
+        <div className="relative">
+          
+          {/* AI Input Overlay */}
+          <div className={`absolute inset-0 bg-slate-800 p-4 transition-all duration-300 z-10 ${showAI ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10 pointer-events-none'}`}>
+            <form onSubmit={handleAskAI} className="h-full flex flex-col gap-4">
+              <div className="flex-1 bg-slate-900/50 rounded-2xl p-4 border border-slate-700 focus-within:border-indigo-500/50 transition-colors">
+                <textarea
+                  className="w-full h-full bg-transparent text-white placeholder-slate-500 resize-none outline-none text-lg"
+                  placeholder="Ask anything...&#10;'15% tip on $80'&#10;'Sq root of 144 plus 5'&#10;'Convert 100 EUR to USD'"
+                  value={aiQuery}
+                  onChange={(e) => setAiQuery(e.target.value)}
+                  autoFocus={showAI}
+                />
+              </div>
+              <button 
+                type="submit"
+                disabled={isAiLoading || !aiQuery.trim()}
+                className="h-16 bg-indigo-500 hover:bg-indigo-400 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-2xl font-medium text-xl shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2 transition-all active:scale-95"
+              >
+                {isAiLoading ? (
+                  <>
+                    <Loader2 className="animate-spin" /> Calculating...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={20} /> Solve with Magic ✨
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+
+          {/* Keypad */}
+          <div className={`p-4 grid grid-cols-4 gap-3 bg-slate-800 transition-all duration-300 ${showAI ? 'opacity-0 scale-95' : 'opacity-100 scale-100'}`}>
+            <Button text="AC" onClick={handleClear} variant="secondary" className="text-xl" />
+            <Button text="%" onClick={handlePercent} variant="secondary" />
+            <Button text={<Delete size={24} />} onClick={handleDelete} variant="secondary" />
+            <Button text="÷" onClick={() => handleOperation('÷')} variant="action" />
+
+            <Button text="7" onClick={() => handleNumber('7')} />
+            <Button text="8" onClick={() => handleNumber('8')} />
+            <Button text="9" onClick={() => handleNumber('9')} />
+            <Button text="×" onClick={() => handleOperation('×')} variant="action" />
+
+            <Button text="4" onClick={() => handleNumber('4')} />
+            <Button text="5" onClick={() => handleNumber('5')} />
+            <Button text="6" onClick={() => handleNumber('6')} />
+            <Button text="-" onClick={() => handleOperation('-')} variant="action" />
+
+            <Button text="1" onClick={() => handleNumber('1')} />
+            <Button text="2" onClick={() => handleNumber('2')} />
+            <Button text="3" onClick={() => handleNumber('3')} />
+            <Button text="+" onClick={() => handleOperation('+')} variant="action" />
+
+            <Button text="0" onClick={() => handleNumber('0')} className="col-span-2" />
+            <Button text="." onClick={() => handleNumber('.')} />
+            <Button text="=" onClick={handleEquals} variant="accent" />
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
